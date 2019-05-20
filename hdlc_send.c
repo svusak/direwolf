@@ -21,6 +21,8 @@
 #include "direwolf.h"
 
 #include <stdio.h>
+#include <math.h>
+#include <stdint.h>
 
 #include "hdlc_send.h"
 #include "audio.h"
@@ -28,16 +30,27 @@
 #include "textcolor.h"
 #include "fcs_calc.h"
 
-static void send_control (int, int);
-static void send_data (int, int);
-static void send_bit (int, int);
+#define UNSCRAMBLED 1
+#define SCRAMBLED 0
+#define NO_NRZI 1
+#define NRZI 0
 
 
+static void send_control (int, int, int, int);
+static void send_data (int, int, int, int);
+static void send_bit (int, int, int, int);
+static int calculate_len(unsigned char *, int);
+static int calc_data (int);
 
 static int number_of_bits_sent[MAX_CHANS];		// Count number of bits sent by "hdlc_send_frame" or "hdlc_send_flags"
 
-
-
+uint8_t flip(uint8_t b)
+{
+    b = (b&0xF0) >> 4 | (b&0x0F) << 4;
+    b = (b&0xCC) >> 2 | (b&0x33) << 2;
+    b = (b&0xAA) >> 1 | (b&0x55) << 1;
+    return b;
+}
 
 
 /*-------------------------------------------------------------
@@ -75,6 +88,7 @@ static int number_of_bits_sent[MAX_CHANS];		// Count number of bits sent by "hdl
  *
  *--------------------------------------------------------------*/
 
+
 int hdlc_send_frame (int chan, unsigned char *fbuf, int flen, int bad_fcs)
 {
 	int j, fcs;
@@ -90,25 +104,29 @@ int hdlc_send_frame (int chan, unsigned char *fbuf, int flen, int bad_fcs)
 #endif
 
 
-	send_control (chan, 0x7e);	/* Start frame */
+	send_control (chan, 0x7e, SCRAMBLED, NRZI);	/* Start frame */
+	send_control (chan, 0x7e, SCRAMBLED, NRZI);	/* Start frame */
+	send_control (chan, 0x7e, SCRAMBLED, NRZI);	/* Start frame */
+	send_control (chan, 0x7e, SCRAMBLED, NRZI);	/* Start frame */
 	
 	for (j=0; j<flen; j++) {
-	  send_data (chan, fbuf[j]);
+	  send_data (chan, fbuf[j], SCRAMBLED, NRZI);
 	}
 
 	fcs = fcs_calc (fbuf, flen);
 
 	if (bad_fcs) {
 	  /* For testing only - Simulate a frame getting corrupted along the way. */
-	  send_data (chan, (~fcs) & 0xff);
-	  send_data (chan, ((~fcs) >> 8) & 0xff);
+	  send_data (chan, (~fcs) & 0xff, SCRAMBLED, NRZI);
+	  send_data (chan, ((~fcs) >> 8) & 0xff, SCRAMBLED, NRZI);
 	}
 	else {
-	  send_data (chan, fcs & 0xff);
-	  send_data (chan, (fcs >> 8) & 0xff);
+	  send_data (chan, fcs & 0xff, SCRAMBLED, NRZI);
+	  send_data (chan, (fcs >> 8) & 0xff, SCRAMBLED, NRZI);
 	}
 
-	send_control (chan, 0x7e);	/* End frame */
+	send_control (chan, 0x7e, SCRAMBLED, NRZI);	/* End frame */
+	send_control (chan, 0x7e, SCRAMBLED, NRZI);	/* End frame */
 
 	return (number_of_bits_sent[chan]);
 }
@@ -155,11 +173,12 @@ int hdlc_send_flags (int chan, int nflags, int finish)
 	fflush (stdout);
 #endif
 
-	/* The AX.25 spec states that when the transmitter is on but not sending data */
+	/* The
+	 * AX.25 spec states that when the transmitter is on but not sending data */
 	/* it should send a continuous stream of "flags." */
 
 	for (j=0; j<nflags; j++) {
-	  send_control (chan, 0x7e);
+	  send_control (chan, 0x7e, SCRAMBLED, NRZI);
 	}
 
 /* Push out the final partial buffer! */
@@ -172,40 +191,74 @@ int hdlc_send_flags (int chan, int nflags, int finish)
 }
 
 
+int hdlc_send_header (int chan, unsigned  char *fbuf, int flen) {
 
-static int stuff[MAX_CHANS];		// Count number of "1" bits to keep track of when we
-					// need to break up a long run by "bit stuffing."
-					// Needs to be array because we could be transmitting
-					// on multiple channels at the same time.
+	number_of_bits_sent[chan] = 0;
+    //Preamble
+    int i;
+    for (i = 0; i < 8; i++) {
+        send_control (chan, 0xAA, UNSCRAMBLED, NO_NRZI);
+    }
 
-static void send_control (int chan, int x) 
+    //Seq
+	send_control (chan, ~0x7c, UNSCRAMBLED, NO_NRZI);
+	send_control (chan, ~0x56, UNSCRAMBLED, NO_NRZI);
+
+	//Length
+    int frame_len = (calculate_len(fbuf, flen)+7+16+24)>>3;
+
+    send_control (chan,~flip((frame_len>>8)&0xff),UNSCRAMBLED, NO_NRZI);
+    send_control (chan,~flip((frame_len&0xff)),UNSCRAMBLED, NO_NRZI );
+
+	return (number_of_bits_sent[chan]);
+}
+
+
+
+
+	static int stuff[MAX_CHANS];// Count number of "1" bits to keep track of when we
+								// need to break up a long run by "bit stuffing."
+								// Needs to be array because we could be transmitting
+								// on multiple channels at the same time.
+
+
+
+
+static void send_control (int chan, int x, int scr, int no_rzi)
 {
+
 	int i;
 
 	for (i=0; i<8; i++) {
-	  send_bit (chan, x & 1);
-	  x >>= 1;
+
+	    send_bit (chan, x & 1, scr, no_rzi);
+	    x >>= 1;
 	}
 	
 	stuff[chan] = 0;
 }
 
-static void send_data (int chan, int x) 
+ /*
+  * Always send scrambled bits and transmit all bits
+  * Used only for frame transmitting (without flags)
+ */
+static void send_data (int chan, int x, int scr, int nrzi)
 {
+
 	int i;
 
 	for (i=0; i<8; i++) {
-	  send_bit (chan, x & 1);
-	  if (x & 1) {
-	    stuff[chan]++;
-	    if (stuff[chan] == 5) {
-	      send_bit (chan, 0);
-	      stuff[chan] = 0;
+	    send_bit (chan, x & 1, scr, nrzi);
+	    if (x & 1) { //  if the last bit is 1, the result of x & 1 is 1; otherwise, it is 0
+	        stuff[chan]++;
+	        if (stuff[chan] == 5) { // bit stuffing
+	            send_bit (chan, 0, scr, nrzi);
+	            stuff[chan] = 0;
+	        }
+	    } else {
+	        stuff[chan] = 0;
 	    }
-	  } else {
-	    stuff[chan] = 0;
-          }
-	  x >>= 1;
+	    x >>= 1;
 	}
 }
 
@@ -214,18 +267,67 @@ static void send_data (int chan, int x)
  * data 1 bit -> no change.
  * data 0 bit -> invert signal.
  */
-
-static void send_bit (int chan, int b)
-{
+static void send_bit (int chan, int b, int scr, int nrzi) {
 	static int output[MAX_CHANS];
 
-	if (b == 0) {
-	  output[chan] = ! output[chan];
-	}
-
-	tone_gen_put_bit (chan, output[chan]);
+    if (nrzi) {
+        output[chan] = b;
+    } else {
+        if (b == 0) {
+            output[chan] = ! output[chan];
+        }
+    }
 
 	number_of_bits_sent[chan]++;
+
+	tone_gen_put_bit (chan, output[chan], scr, nrzi);
+
 }
+
+
+static int calculate_len(unsigned char *fbuf, int flen) {
+
+	double bits_num = 0;
+
+    int j, fcs;
+
+
+    for (j=0; j<flen; j++) {
+        bits_num += calc_data (fbuf[j]);
+    }
+
+    fcs = fcs_calc (fbuf, flen);
+
+
+    bits_num += calc_data (fcs & 0xff);
+    bits_num += calc_data ((fcs >> 8) & 0xff);
+
+	return bits_num;
+}
+
+
+static int calc_data (int x)
+{
+    int bits_num = 0;
+    int i;
+
+    int stuffing = 0;
+    for (i=0; i<8; i++) {
+        bits_num += 1;
+        if (x & 1) {
+            stuffing += 1;
+            if (stuffing == 5) {
+                bits_num += 1;
+                stuffing = 0;
+            }
+        } else {
+            stuffing = 0;
+        }
+        x >>= 1;
+    }
+    return bits_num;
+
+}
+
 
 /* end hdlc_send.c */
