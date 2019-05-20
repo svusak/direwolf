@@ -1057,7 +1057,9 @@ static int send_one_frame (int c, int p, packet_t pp)
 	  }
 	}
 
-	nb = hdlc_send_frame (c, fbuf, flen, send_invalid_fcs2);
+	nb = 0;
+	nb += hdlc_send_header(c, fbuf, flen);
+	nb += hdlc_send_frame (c, fbuf, flen, send_invalid_fcs2);
 	return (nb);
 
 } /* end send_one_frame */
