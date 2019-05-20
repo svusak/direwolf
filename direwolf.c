@@ -771,7 +771,7 @@ int main (int argc, char *argv[])
 	  ptt_set (OCTYPE_PTT, chan, 1);
 	  while (n-- > 0) {
 
-	    tone_gen_put_bit (chan, n & 1);
+	    tone_gen_put_bit (chan, n & 1, 0, 0);
 
 	  }
 	  ptt_set (OCTYPE_PTT, chan, 0);
@@ -872,6 +872,8 @@ void app_process_rec_packet (int chan, int subchan, int slice, packet_t pp, alev
 	assert (subchan >= -1 && subchan < MAX_SUBCHANS);
 	assert (slice >= 0 && slice < MAX_SLICERS);
 	assert (pp != NULL);	// 1.1J+
+
+	dw_printf(pp);
      
 	strlcpy (display_retries, "", sizeof(display_retries));
 	if (audio_config.achan[chan].fix_bits != RETRY_NONE || audio_config.achan[chan].passall) {
